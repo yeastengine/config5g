@@ -1,4 +1,4 @@
-module github.com/omec-project/config5g
+module github.com/yeastengine/config5g
 
 go 1.21
 
