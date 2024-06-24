@@ -7,7 +7,6 @@ package client
 import (
 	context "context"
 	"math/rand"
-	"os"
 	"time"
 
 	"github.com/yeastengine/config5g/logger"
@@ -34,10 +33,7 @@ type PlmnId struct {
 	MNC string
 }
 
-type Nssai struct {
-	sst string
-	sd  string
-}
+type Nssai struct{}
 
 type ConfigClient struct {
 	Client            protos.ConfigServiceClient
@@ -45,6 +41,7 @@ type ConfigClient struct {
 	Channel           chan *protos.NetworkSliceResponse
 	Host              string
 	Version           string
+	Id                string
 	MetadataRequested bool
 }
 
@@ -62,8 +59,8 @@ type ConfClient interface {
 }
 
 // This API is added to control metadata from NF Clients
-func ConnectToConfigServer(host string) ConfClient {
-	confClient := CreateChannel(host, 10000)
+func ConnectToConfigServer(host string, id string) ConfClient {
+	confClient := CreateChannel(host, 10000, id)
 	if confClient == nil {
 		logger.GrpcLog.Errorln("create grpc channel to config pod failed")
 		return nil
@@ -80,10 +77,10 @@ func (confClient *ConfigClient) PublishOnConfigChange(mdataFlag bool) chan *prot
 }
 
 // pass structr which has configChangeUpdate interface
-func ConfigWatcher(webuiUri string) chan *protos.NetworkSliceResponse {
+func ConfigWatcher(webuiUri string, id string) chan *protos.NetworkSliceResponse {
 	// var confClient *gClient.ConfigClient
 	// TODO: use port from configmap.
-	confClient := CreateChannel(webuiUri, 10000)
+	confClient := CreateChannel(webuiUri, 10000, id)
 	if confClient == nil {
 		logger.GrpcLog.Errorf("create grpc channel to config pod failed")
 		return nil
@@ -93,7 +90,7 @@ func ConfigWatcher(webuiUri string) chan *protos.NetworkSliceResponse {
 	return commChan
 }
 
-func CreateChannel(host string, timeout uint32) ConfClient {
+func CreateChannel(host string, timeout uint32, id string) ConfClient {
 	logger.GrpcLog.Infoln("create config client")
 	// Second, check to see if we can reuse the gRPC connection for a new P4RT client
 	conn, err := newClientConnection(host)
@@ -106,6 +103,7 @@ func CreateChannel(host string, timeout uint32) ConfClient {
 		Client: protos.NewConfigServiceClient(conn),
 		Conn:   conn,
 		Host:   host,
+		Id:     id,
 	}
 
 	return client
@@ -156,7 +154,6 @@ func (confClient *ConfigClient) GetConfigClientConn() *grpc.ClientConn {
 
 func (confClient *ConfigClient) subscribeToConfigPod(commChan chan *protos.NetworkSliceResponse) {
 	logger.GrpcLog.Infoln("subscribeToConfigPod ")
-	myid := os.Getenv("HOSTNAME")
 	var stream protos.ConfigService_NetworkSliceSubscribeClient
 	for {
 		if stream == nil {
@@ -164,7 +161,7 @@ func (confClient *ConfigClient) subscribeToConfigPod(commChan chan *protos.Netwo
 			var err error
 			if status == connectivity.Ready {
 				logger.GrpcLog.Infoln("connectivity ready ")
-				rreq := &protos.NetworkSliceRequest{RestartCounter: selfRestartCounter, ClientId: myid, MetadataRequested: confClient.MetadataRequested}
+				rreq := &protos.NetworkSliceRequest{RestartCounter: selfRestartCounter, ClientId: confClient.Id, MetadataRequested: confClient.MetadataRequested}
 				if stream, err = confClient.Client.NetworkSliceSubscribe(context.Background(), rreq); err != nil {
 					logger.GrpcLog.Errorf("Failed to subscribe: %v", err)
 					time.Sleep(time.Second * 5)
@@ -212,48 +209,6 @@ func (confClient *ConfigClient) subscribeToConfigPod(commChan chan *protos.Netwo
 			commChan <- rsp
 		} else {
 			logger.GrpcLog.Errorf("Config Pod is restarted and no config received")
-		}
-	}
-}
-
-func readConfigInLoop(confClient *ConfigClient, commChan chan *protos.NetworkSliceResponse) {
-	myid := os.Getenv("HOSTNAME")
-	configReadTimeout := time.NewTicker(5000 * time.Millisecond)
-	for {
-		select {
-		case <-configReadTimeout.C:
-			status := confClient.Conn.GetState()
-			if status == connectivity.Ready {
-				rreq := &protos.NetworkSliceRequest{RestartCounter: selfRestartCounter, ClientId: myid, MetadataRequested: confClient.MetadataRequested}
-				rsp, err := confClient.Client.GetNetworkSlice(context.Background(), rreq)
-				if err != nil {
-					logger.GrpcLog.Errorln("read Network Slice config from webconsole failed : ", err)
-					continue
-				}
-				logger.GrpcLog.Debugf("#Network Slices %v, RC of configpod %v ", len(rsp.NetworkSlice), rsp.RestartCounter)
-				if configPodRestartCounter == 0 || (configPodRestartCounter == rsp.RestartCounter) {
-					// first time connection or config update
-					configPodRestartCounter = rsp.RestartCounter
-					if len(rsp.NetworkSlice) > 0 {
-						// always carries full config copy
-						logger.GrpcLog.Infoln("First time config Received ", rsp)
-						commChan <- rsp
-					} else if rsp.ConfigUpdated == 1 {
-						// config delete , all slices deleted
-						logger.GrpcLog.Infoln("Complete config deleted ")
-						commChan <- rsp
-					}
-				} else if len(rsp.NetworkSlice) > 0 {
-					logger.GrpcLog.Errorf("Config received after config Pod restart")
-					// config received after config pod restart
-					configPodRestartCounter = rsp.RestartCounter
-					commChan <- rsp
-				} else {
-					logger.GrpcLog.Errorf("Config Pod is restarted and no config received")
-				}
-			} else {
-				logger.GrpcLog.Errorln("read Network Slice config from webconsole skipped. GRPC channel down ")
-			}
 		}
 	}
 }
